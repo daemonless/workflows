@@ -223,7 +223,7 @@ jobs:
           echo "pw=$pw" >> "$GITHUB_OUTPUT"
 
       - name: Build in FreeBSD VM (${{ matrix.tag }}${{ matrix.arch_suffix }})
-        uses: vmactions/freebsd-vm@v1.5.9
+        uses: vmactions/freebsd-vm@v1.6.0
         env:
           # A debug run publishes nothing, so its VM, which a console can reach,
           # gets no credentials; builds fall back to unauthenticated API calls.
@@ -570,7 +570,7 @@ jobs:
           echo "pw=$pw" >> "$GITHUB_OUTPUT"
 
       - name: Test in FreeBSD VM
-        uses: vmactions/freebsd-vm@v1.5.9
+        uses: vmactions/freebsd-vm@v1.6.0
         with:
           release: "15.1"
           vnc-password: ${{ steps.vnc.outputs.pw }}
