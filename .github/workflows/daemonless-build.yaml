@@ -85,10 +85,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if [ -n "${{ inputs.build_tools_ref }}" ]; then
-            echo "ref=${{ inputs.build_tools_ref }}" >> $GITHUB_OUTPUT
+            echo "ref=${{ inputs.build_tools_ref }}" >> "$GITHUB_OUTPUT"
           else
             REF=$(gh api repos/daemonless/build-tools/releases/latest --jq '.tag_name')
-            echo "ref=$REF" >> $GITHUB_OUTPUT
+            echo "ref=$REF" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Install dependencies
@@ -99,7 +99,7 @@ jobs:
         run: |
           # Fetch dbuild
           curl -sSL "https://github.com/daemonless/dbuild/archive/${{ inputs.dbuild_ref || env.DBUILD_REF }}.tar.gz" | tar xz -C /tmp
-          DBUILD_DIR=$(ls -d /tmp/dbuild-* | head -1)
+          DBUILD_DIR=$(find /tmp -maxdepth 1 -type d -name 'dbuild-*' | head -1)
           export PYTHONPATH="$DBUILD_DIR"
           ARCH_FILTER="${{ inputs.arch }}"
           # daemonless org defaults CI to amd64-only -- non-amd64 archs are
@@ -128,7 +128,7 @@ jobs:
         run: |
           set -o pipefail
           curl -fsSL "https://github.com/daemonless/dbuild/archive/${{ inputs.dbuild_ref || env.DBUILD_REF }}.tar.gz" | tar xz -C /tmp
-          DBUILD_DIR=$(ls -d /tmp/dbuild-* | head -1)
+          DBUILD_DIR=$(find /tmp -maxdepth 1 -type d -name 'dbuild-*' | head -1)
           export PYTHONPATH="$DBUILD_DIR"
           # rc captured on its own: piping the { ...; echo } block through tee
           # reported the last echo's status, so lint errors never failed the job.
@@ -177,7 +177,7 @@ jobs:
         if: inputs.generate
         run: |
           curl -sSL "https://github.com/daemonless/dbuild/archive/${{ inputs.dbuild_ref || env.DBUILD_REF }}.tar.gz" | tar xz -C /tmp
-          DBUILD_DIR=$(ls -d /tmp/dbuild-* | head -1)
+          DBUILD_DIR=$(find /tmp -maxdepth 1 -type d -name 'dbuild-*' | head -1)
           export PYTHONPATH="$DBUILD_DIR"
           pip install -q PyYAML jinja2
           python3 -m dbuild generate
@@ -398,7 +398,7 @@ jobs:
           exit_code=$(cat cit-results/cit-exit-code)
           if [ "$exit_code" != "0" ]; then
             echo "Tests failed with exit code $exit_code"
-            exit $exit_code
+            exit "$exit_code"
           fi
 
       - name: Update Docker Hub description
@@ -420,11 +420,11 @@ jobs:
           OLD=$(cat .version-old 2>/dev/null | tr -d '[:space:]' || echo "")
           NEW=$(cat .version-new 2>/dev/null | tr -d '[:space:]' || echo "")
           if [ -n "$NEW" ] && [ -n "$OLD" ] && [ "$OLD" != "$NEW" ]; then
-            echo "label=${OLD} → ${NEW}" >> $GITHUB_OUTPUT
+            echo "label=${OLD} → ${NEW}" >> "$GITHUB_OUTPUT"
           elif [ -n "$NEW" ]; then
-            echo "label=${NEW}" >> $GITHUB_OUTPUT
+            echo "label=${NEW}" >> "$GITHUB_OUTPUT"
           else
-            echo "label=" >> $GITHUB_OUTPUT
+            echo "label=" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Discord notification
@@ -666,7 +666,7 @@ jobs:
             --arg generated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             '{image: $image, generated: $generated, tags: {}}' > sbom.json
 
-          for f in $(find sbom-artifacts/ -name '*-sbom.json'); do
+          while IFS= read -r f; do
             [ -f "$f" ] || continue
             tag=$(jq -r '.tag' "$f")
             [ -z "$tag" ] && continue
@@ -675,7 +675,7 @@ jobs:
                --slurpfile data "$f" \
                '.tags[$tag] = ($data[0] | del(.image, .tag))' \
                sbom.json > tmp.json && mv tmp.json sbom.json
-          done
+          done < <(find sbom-artifacts/ -name '*-sbom.json')
 
           # Sort all keys and package lists alphabetically for stable ordering
           jq -S '.tags[].packages[] |= sort_by(.name)' sbom.json > tmp.json && mv tmp.json sbom.json
@@ -688,7 +688,7 @@ jobs:
         if: inputs.generate
         run: |
           curl -sSL "https://github.com/daemonless/dbuild/archive/${{ inputs.dbuild_ref || env.DBUILD_REF }}.tar.gz" | tar xz -C /tmp
-          DBUILD_DIR=$(ls -d /tmp/dbuild-* | head -1)
+          DBUILD_DIR=$(find /tmp -maxdepth 1 -type d -name 'dbuild-*' | head -1)
           export PYTHONPATH="$DBUILD_DIR"
           pip install -q PyYAML jinja2
           # "=== Generated <name> ===" is dbuild's own step log for each file
@@ -737,6 +737,7 @@ jobs:
             if cmp -s /tmp/sbom-old.json /tmp/sbom-new.json; then
               git checkout -q -- sbom.json
             fi
+            # shellcheck disable=SC2086 # FILES is a space-separated list
             git add $FILES
             if git diff --cached --quiet; then
               echo "No content change to sbom.json or generated files"
@@ -800,7 +801,8 @@ jobs:
           # filename instead (dbuild/sbom.py writes
           # <image>-<tag><arch_suffix>-cyclonedx.json / -spdx.json), which
           # works regardless of nesting.
-          for f in $(find sbom-artifacts -name "${IMAGE_NAME}-*-cyclonedx.json" -o -name "${IMAGE_NAME}-*-spdx.json"); do
+          # fd 3: cosign must not read the file list from stdin.
+          while IFS= read -r f <&3; do
             base="$(basename "$f")"
             rest="${base#"${IMAGE_NAME}"-}"
             if [[ "$rest" == *-cyclonedx.json ]]; then
@@ -817,7 +819,7 @@ jobs:
             fi
             echo "=== Attesting ${predicate_type} SBOM onto ${ref} (${f}) ==="
             cosign attest --yes --type "$predicate_type" --predicate "$f" "$ref"
-          done
+          done 3< <(find sbom-artifacts -name "${IMAGE_NAME}-*-cyclonedx.json" -o -name "${IMAGE_NAME}-*-spdx.json")
 
   # A multi-arch image's bare tag is a manifest list assembled after the
   # builds; it has a digest of its own, so it is signed once it exists.
@@ -855,7 +857,8 @@ jobs:
           # The bare tag is the arch-suffixed one the SBOM is named for,
           # less its suffix (see dbuild/config.py arch_tag_suffix).
           signed=""
-          for f in $(find sbom-artifacts -name "${IMAGE_NAME}-*-cyclonedx.json"); do
+          # fd 3: cosign must not read the file list from stdin.
+          while IFS= read -r f <&3; do
             tag="$(basename "$f")"; tag="${tag#"${IMAGE_NAME}"-}"; tag="${tag%-cyclonedx.json}"
             bare="${tag%-amd64}"; bare="${bare%-aarch64}"
             [[ "$bare" != "$tag" && " $signed " != *" $bare "* ]] || continue
@@ -863,7 +866,7 @@ jobs:
             echo "=== Signing manifest list ${ref} ==="
             cosign sign --yes "$ref"
             signed="$signed $bare"
-          done
+          done 3< <(find sbom-artifacts -name "${IMAGE_NAME}-*-cyclonedx.json")
 
   # Trigger status page update after successful builds
   notify-status:
