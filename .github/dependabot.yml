@@ -1,0 +1,18 @@
+# Keeps the actions this repo's workflows pin current. The image repos call
+# daemonless-build.yaml by tag, so a bump here reaches them when v1 moves.
+version: 2
+
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    # One PR for all action bumps rather than one per action.
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
+    labels: ["dependencies"]
+    open-pull-requests-limit: 3
