@@ -513,9 +513,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          VARIANT: ${{ inputs.variant }}
         run: |
           export PYTHONPATH="/tmp/dbuild"
-          python3 -m dbuild -v manifest
+          # A one-variant build re-creates only that tag's manifests.
+          python3 -m dbuild -v ${VARIANT:+--variant "$VARIANT"} manifest
 
   # Compose-only test (no build, just test pre-built images)
   test-compose:
@@ -698,11 +700,13 @@ jobs:
       - name: Commit SBOM and generated files
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VARIANT: ${{ inputs.variant }}
         run: |
           # Keep this run's files aside: main moves while the build runs (the
           # aarch64 leg and overlapping runs commit too), so each attempt
-          # starts from the current tip and lays our files on top. The newest
-          # build's SBOM is the truth; there is nothing to merge.
+          # starts from the current tip and lays our files on top. A full
+          # build's SBOM is the truth; a one-variant build only replaces the
+          # tags it built and keeps the rest of main's.
           FILES="sbom.json"
           for f in ${{ steps.generate.outputs.files }}; do
             [ -f "$f" ] && FILES="$FILES $f"
@@ -718,6 +722,12 @@ jobs:
             git fetch -q origin main
             git reset -q --hard origin/main
             for f in $FILES; do cp "/tmp/ours/$f" "$f"; done
+            if [ -n "$VARIANT" ] && git cat-file -e HEAD:sbom.json 2>/dev/null; then
+              git show HEAD:sbom.json > /tmp/sbom-main.json
+              jq -S --slurpfile ours /tmp/ours/sbom.json \
+                '.image = $ours[0].image | .generated = $ours[0].generated | .tags += $ours[0].tags' \
+                /tmp/sbom-main.json > sbom.json
+            fi
 
             # The top-level and per-tag `generated` timestamps change every
             # run; only commit when the versions or package lists actually
