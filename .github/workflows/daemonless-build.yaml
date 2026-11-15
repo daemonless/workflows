@@ -111,7 +111,7 @@ jobs:
           if [ -z "$ARCH_FILTER" ] && [ "${{ github.repository_owner }}" = "daemonless" ]; then
             ARCH_FILTER="amd64"
           fi
-          python3 -m dbuild ${ARCH_FILTER:+--arch "$ARCH_FILTER"} detect --format github ${{ inputs.variant && format('--variant {0}', inputs.variant) || '' }}
+          python3 -m dbuild ${ARCH_FILTER:+--arch "$ARCH_FILTER"} ${{ inputs.variant && format('--variant {0}', inputs.variant) || '' }} detect --format github
 
   # Fails the check if dbuild lint reports errors. build doesn't need it:
   # a metadata error shows red but never holds back a rebuild.
