@@ -287,8 +287,10 @@ jobs:
             ARCH="${{ matrix.arch }}"
             IMAGE_NAME="${{ inputs.image_name }}"
 
-            # Read old version from sbom.json before build
-            OLD_VERSION=$(jq -r --arg tag "$VARIANT" '.tags[$tag].app_version // ""' sbom.json 2>/dev/null || echo "")
+            # Read old version from sbom.json before build. Per-arch images
+            # key sbom.json by the suffixed tag (16-pkg-latest-amd64).
+            OLD_VERSION=$(jq -r --arg a "${VARIANT}${{ matrix.arch_suffix }}" --arg t "$VARIANT" \
+              '(.tags[$a] // .tags[$t]).app_version // ""' sbom.json 2>/dev/null || echo "")
             echo "$OLD_VERSION" > .version-old
 
             # Build
