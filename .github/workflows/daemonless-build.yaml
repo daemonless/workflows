@@ -368,7 +368,7 @@ jobs:
             $DBUILD -v build --variant "$VARIANT" --arch "$ARCH"
 
             # Extract new version from built image
-            NEW_VERSION=$(podman run --rm --entrypoint "" "ghcr.io/daemonless/${IMAGE_NAME}:build-${VARIANT}" cat /app/version 2>/dev/null || echo "")
+            NEW_VERSION=$(podman run --rm --entrypoint "" "${DBUILD_REGISTRY}/${IMAGE_NAME}:build-${VARIANT}" cat /app/version 2>/dev/null || echo "")
             echo "$NEW_VERSION" > .version-new
 
             # Screenshot deps: amd64 only (no aarch64 chromium); dbuild then
@@ -566,6 +566,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.event_name != 'pull_request' && secrets.GITHUB_TOKEN || '' }}
           DOCKERHUB_USERNAME: ${{ github.event_name != 'pull_request' && secrets.DOCKERHUB_USERNAME || '' }}
           DOCKERHUB_TOKEN: ${{ github.event_name != 'pull_request' && secrets.DOCKERHUB_TOKEN || '' }}
+          DBUILD_REGISTRY: ${{ inputs.registry }}
         run: |
           export PYTHONPATH=/tmp/dbuild
           python3 /tmp/dbuild/.github/scripts/linux-image.py ${{ matrix.arch }} \
@@ -611,11 +612,16 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DBUILD_REGISTRY: ${{ inputs.registry }}
           VARIANT: ${{ inputs.variant }}
         run: |
           export PYTHONPATH="/tmp/dbuild"
           # A one-variant build re-creates only that tag's manifests.
-          python3 -m dbuild -v ${VARIANT:+--variant "$VARIANT"} manifest
+          args=(-v)
+          if [ -n "$VARIANT" ]; then
+            args+=(--variant "$VARIANT")
+          fi
+          python3 -m dbuild "${args[@]}" manifest
 
   # Compose-only test (no build, just test pre-built images)
   test-compose:
@@ -776,7 +782,7 @@ jobs:
   # Merge SBOMs and commit to repo
   commit-sbom:
     needs: build
-    if: success() && github.event_name != 'pull_request'
+    if: success() && github.event_name != 'pull_request' && github.ref_type == 'branch'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -801,6 +807,7 @@ jobs:
             --arg generated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             '{image: $image, generated: $generated, tags: {}}' > sbom.json
 
+          count=0
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             tag=$(jq -r '.tag' "$f")
@@ -810,7 +817,13 @@ jobs:
                --slurpfile data "$f" \
                '.tags[$tag] = ($data[0] | del(.image, .tag))' \
                sbom.json > tmp.json && mv tmp.json sbom.json
+            count=$((count + 1))
           done < <(find sbom-artifacts/ -name '*-sbom.json')
+
+          if [ "$count" -eq 0 ]; then
+            echo "::error::No *-sbom.json files found under sbom-artifacts/; refusing to overwrite sbom.json"
+            exit 1
+          fi
 
           # Sort all keys and package lists alphabetically for stable ordering
           jq -S '.tags[].packages[] |= sort_by(.name)' sbom.json > tmp.json && mv tmp.json sbom.json
@@ -818,8 +831,7 @@ jobs:
           echo "Tags: $(jq -r '.tags | keys | join(", ")' sbom.json)"
           jq -r '.tags | to_entries[] | "\(.key): \(.value.summary.total) packages"' sbom.json
 
-      - name: Generate Containerfile/README from templates
-        id: generate
+      - name: Prepare dbuild for template generation
         if: inputs.generate
         env:
           FETCH_REF: ${{ inputs.dbuild_ref || env.DBUILD_REF }}
@@ -833,49 +845,57 @@ jobs:
           rm -rf /tmp/dbuild
           mkdir -p /tmp/dbuild
           curl -fsSL "https://github.com/daemonless/dbuild/archive/${FETCH_REF}.tar.gz" | tar xz -C /tmp/dbuild --strip-components=1
-          export PYTHONPATH="/tmp/dbuild"
           pip install -q PyYAML jinja2
-          # "=== Generated <name> ===" is dbuild's own step log for each file
-          # it writes (Containerfile, Containerfile.pkg, Containerfile.krb,
-          # README.md, ...) -- parse it instead of guessing variant names.
-          FILES=$(python3 -m dbuild generate | tee /dev/stderr | sed -n 's/^=== Generated \(.*\) ===$/\1/p' | tr '\n' ' ')
-          echo "files=$FILES" >> "$GITHUB_OUTPUT"
 
       - name: Commit SBOM and generated files
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VARIANT: ${{ inputs.variant }}
+          GENERATE: ${{ inputs.generate }}
           SERVER_URL: ${{ github.server_url }}
-          GENERATED_FILES: ${{ steps.generate.outputs.files }}
+          TARGET_BRANCH: ${{ github.ref_name }}
         run: |
-          # Keep this run's files aside: main moves while the build runs (the
-          # aarch64 leg and overlapping runs commit too), so each attempt
-          # starts from the current tip and lays our files on top. A full
-          # build's SBOM is the truth; a one-variant build only replaces the
-          # tags it built and keeps the rest of main's.
-          FILES="sbom.json"
-          # shellcheck disable=SC2086 # GENERATED_FILES is a space-separated list
-          for f in $GENERATED_FILES; do
-            [ -f "$f" ] && FILES="$FILES $f"
-          done
+          set -eo pipefail
+
+          case "$TARGET_BRANCH" in
+            ""|-*|*..*|*[[:space:]]*)
+              echo "::error::Invalid target branch: $TARGET_BRANCH"
+              exit 1
+              ;;
+          esac
+
+          # Keep the built SBOM aside: the target branch may move while the
+          # build runs (aarch64 legs and overlapping commits), so each attempt
+          # resets to the current branch tip before generating files and laying
+          # our SBOM on top. A full build's SBOM is the truth; a one-variant
+          # build only replaces the tags it built and keeps the rest.
           mkdir -p /tmp/ours
-          for f in $FILES; do
-            mkdir -p "/tmp/ours/$(dirname "$f")" && cp "$f" "/tmp/ours/$f"
-          done
+          cp sbom.json /tmp/ours/sbom.json
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           AUTH_HEADER="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
           git config --local "http.${SERVER_URL}/.extraheader" "$AUTH_HEADER"
           for attempt in 1 2 3 4 5; do
-            git fetch -q origin main
-            git reset -q --hard origin/main
-            for f in $FILES; do cp "/tmp/ours/$f" "$f"; done
+            git fetch -q origin "+refs/heads/${TARGET_BRANCH}:refs/remotes/origin/${TARGET_BRANCH}"
+            git reset -q --hard "origin/$TARGET_BRANCH"
+            cp /tmp/ours/sbom.json sbom.json
             if [ -n "$VARIANT" ] && git cat-file -e HEAD:sbom.json 2>/dev/null; then
               git show HEAD:sbom.json > /tmp/sbom-main.json
               jq -S --slurpfile ours /tmp/ours/sbom.json \
                 '.image = $ours[0].image | .generated = $ours[0].generated | .tags += $ours[0].tags' \
                 /tmp/sbom-main.json > sbom.json
+            fi
+
+            FILES="sbom.json"
+            if [ "$GENERATE" = "true" ]; then
+              GEN_FILES=$(PYTHONPATH="/tmp/dbuild" python3 -m dbuild generate | tee /dev/stderr | sed -n 's/^=== Generated \(.*\) ===$/\1/p' | tr '\n' ' ')
+              # shellcheck disable=SC2086 # GEN_FILES is a space-separated list
+              for f in $GEN_FILES; do
+                if [ -f "$f" ]; then
+                  FILES="$FILES $f"
+                fi
+              done
             fi
 
             # The top-level and per-tag `generated` timestamps change every
@@ -894,10 +914,10 @@ jobs:
             fi
 
             git commit -q -m "Update sbom.json and generated files [skip ci]"
-            if git push; then
+            if git push origin "HEAD:$TARGET_BRANCH"; then
               exit 0
             fi
-            echo "Push rejected (attempt $attempt); main moved, retrying"
+            echo "Push rejected (attempt $attempt); $TARGET_BRANCH moved, retrying"
             sleep $((attempt * 10))
           done
           echo "Could not push after 5 attempts"
@@ -924,13 +944,16 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@v4.1.3
 
-      - name: Login to GHCR
+      - name: Login to registry
         # cosign's own login writes credentials where cosign's keychain reads
         # them (podman login, used by other jobs, writes a path cosign ignores).
         env:
           GH_USER: ${{ github.actor }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: printf '%s' "$GH_TOKEN" | cosign login ghcr.io -u "$GH_USER" --password-stdin
+          DBUILD_REGISTRY: ${{ inputs.registry }}
+        run: |
+          REG_HOST="${DBUILD_REGISTRY%%/*}"
+          printf '%s' "$GH_TOKEN" | cosign login "$REG_HOST" -u "$GH_USER" --password-stdin
 
       - name: Download SBOM artifacts
         uses: actions/download-artifact@v8
@@ -941,6 +964,7 @@ jobs:
       - name: Sign pushed images and attest SBOMs onto them
         env:
           IMAGE_NAME: ${{ inputs.image_name }}
+          DBUILD_REGISTRY: ${{ inputs.registry }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -962,7 +986,7 @@ jobs:
             else
               tag="${rest%-spdx.json}"; predicate_type="spdxjson"
             fi
-            ref="ghcr.io/daemonless/${IMAGE_NAME}:${tag}"
+            ref="${DBUILD_REGISTRY}/${IMAGE_NAME}:${tag}"
             # Once per tag: both SBOM formats name the same image.
             if [[ " $signed " != *" $tag "* ]]; then
               echo "=== Signing ${ref} ==="
@@ -992,11 +1016,14 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@v4.1.3
 
-      - name: Login to GHCR
+      - name: Login to registry
         env:
           GH_USER: ${{ github.actor }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: printf '%s' "$GH_TOKEN" | cosign login ghcr.io -u "$GH_USER" --password-stdin
+          DBUILD_REGISTRY: ${{ inputs.registry }}
+        run: |
+          REG_HOST="${DBUILD_REGISTRY%%/*}"
+          printf '%s' "$GH_TOKEN" | cosign login "$REG_HOST" -u "$GH_USER" --password-stdin
 
       - name: Download SBOM artifacts
         uses: actions/download-artifact@v8
@@ -1007,6 +1034,7 @@ jobs:
       - name: Sign the manifest lists
         env:
           IMAGE_NAME: ${{ inputs.image_name }}
+          DBUILD_REGISTRY: ${{ inputs.registry }}
         run: |
           set -euo pipefail
           # The bare tag is the arch-suffixed one the SBOM is named for,
@@ -1017,7 +1045,7 @@ jobs:
             tag="$(basename "$f")"; tag="${tag#"${IMAGE_NAME}"-}"; tag="${tag%-cyclonedx.json}"
             bare="${tag%-amd64}"; bare="${bare%-aarch64}"
             [[ "$bare" != "$tag" && " $signed " != *" $bare "* ]] || continue
-            ref="ghcr.io/daemonless/${IMAGE_NAME}:${bare}"
+            ref="${DBUILD_REGISTRY}/${IMAGE_NAME}:${bare}"
             echo "=== Signing manifest list ${ref} ==="
             cosign sign --yes "$ref"
             signed="$signed $bare"
@@ -1026,7 +1054,9 @@ jobs:
   # Trigger status page update after successful builds
   notify-status:
     needs: [build, test-compose, commit-sbom, create-manifests]
-    if: always() && !failure() && !cancelled() && github.event_name != 'pull_request'
+    if: >-
+      always() && !failure() && !cancelled() && github.event_name != 'pull_request'
+      && (needs.build.result == 'success' || needs.test-compose.result == 'success')
     runs-on: ubuntu-latest
     permissions: {}
     steps:
