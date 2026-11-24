@@ -44,11 +44,27 @@ runs:
   steps:
     - name: Send notification
       shell: bash
+      env:
+        WEBHOOK_URL: ${{ inputs.webhook_url }}
+        IMAGE_NAME: ${{ inputs.image_name }}
+        TAG: ${{ inputs.tag }}
+        STATUS: ${{ inputs.status }}
+        COMMIT_SHA: ${{ inputs.commit_sha }}
+        COMMIT_URL: ${{ inputs.commit_url }}
+        RUN_URL: ${{ inputs.run_url }}
+        BRANCH: ${{ inputs.branch }}
+        HAS_DOCKERHUB: ${{ inputs.has_dockerhub }}
+        VERSION: ${{ inputs.version }}
+        PUSHED: ${{ inputs.pushed }}
       run: |
-        if [ "${{ inputs.status }}" = "success" ]; then
+        if [ -z "$WEBHOOK_URL" ]; then
+          exit 0
+        fi
+
+        if [ "$STATUS" = "success" ]; then
           COLOR=3066993
           STATUS_EMOJI="✅ Success"
-        elif [ "${{ inputs.status }}" = "cancelled" ]; then
+        elif [ "$STATUS" = "cancelled" ]; then
           COLOR=15105570
           STATUS_EMOJI="⚠️ Cancelled"
         else
@@ -56,23 +72,31 @@ runs:
           STATUS_EMOJI="❌ Failed"
         fi
 
-        SHORT_SHA="${{ inputs.commit_sha }}"
-        SHORT_SHA="${SHORT_SHA:0:7}"
+        SHORT_SHA="${COMMIT_SHA:0:7}"
 
-        if [ "${{ inputs.pushed }}" = "false" ]; then
+        if [ "$PUSHED" = "false" ]; then
           REGISTRY_VALUE="🧪 test only — not pushed"
         else
-          REGISTRY_VALUE="[ghcr.io](https://ghcr.io/daemonless/${{ inputs.image_name }})"
-          if [ "${{ inputs.has_dockerhub }}" = "true" ]; then
-            REGISTRY_VALUE="[ghcr.io](https://ghcr.io/daemonless/${{ inputs.image_name }}) / [docker.io](https://hub.docker.com/r/daemonless/${{ inputs.image_name }})"
+          REGISTRY_VALUE="[ghcr.io](https://ghcr.io/daemonless/${IMAGE_NAME})"
+          if [ "$HAS_DOCKERHUB" = "true" ]; then
+            REGISTRY_VALUE="[ghcr.io](https://ghcr.io/daemonless/${IMAGE_NAME}) / [docker.io](https://hub.docker.com/r/daemonless/${IMAGE_NAME})"
           fi
         fi
 
-        TITLE="${{ inputs.image_name }}:${{ inputs.tag }}"
-        if [ -n "${{ inputs.version }}" ]; then
-          TITLE="$TITLE (${{ inputs.version }})"
+        TITLE="${IMAGE_NAME}:${TAG}"
+        if [ -n "$VERSION" ]; then
+          TITLE="$TITLE ($VERSION)"
         fi
 
+        PAYLOAD=$(jq -n \
+          --arg title "$TITLE $STATUS_EMOJI" \
+          --arg url "$RUN_URL" \
+          --argjson color "$COLOR" \
+          --arg commit "[$SHORT_SHA]($COMMIT_URL)" \
+          --arg branch "$BRANCH" \
+          --arg registry "$REGISTRY_VALUE" \
+          '{embeds:[{title:$title,url:$url,color:$color,fields:[{name:"Commit",value:$commit,inline:true},{name:"Branch",value:$branch,inline:true},{name:"Registry",value:$registry,inline:true}]}]}')
+
         curl -sS -H "Content-Type: application/json" \
-          -d "{\"embeds\":[{\"title\":\"$TITLE $STATUS_EMOJI\",\"url\":\"${{ inputs.run_url }}\",\"color\":$COLOR,\"fields\":[{\"name\":\"Commit\",\"value\":\"[$SHORT_SHA](${{ inputs.commit_url }})\",\"inline\":true},{\"name\":\"Branch\",\"value\":\"${{ inputs.branch }}\",\"inline\":true},{\"name\":\"Registry\",\"value\":\"$REGISTRY_VALUE\",\"inline\":true}]}]}" \
-          "${{ inputs.webhook_url }}"
+          --data-binary "$PAYLOAD" \
+          "$WEBHOOK_URL"

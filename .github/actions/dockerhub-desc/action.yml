@@ -17,18 +17,21 @@ runs:
   steps:
     - name: Install yq
       shell: bash
-      run: sudo apt-get install -y yq
+      run: command -v yq >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y yq)
 
     - name: Update description
       shell: bash
       env:
+        IMAGE_NAME: ${{ inputs.image_name }}
         DOCKERHUB_USERNAME: ${{ inputs.dockerhub_username }}
         DOCKERHUB_TOKEN: ${{ inputs.dockerhub_token }}
       run: |
         # Get JWT token
-        JWT=$(curl -s -X POST https://hub.docker.com/v2/users/login \
-          -H "Content-Type: application/json" \
-          -d "{\"username\":\"${DOCKERHUB_USERNAME}\",\"password\":\"${DOCKERHUB_TOKEN}\"}" | jq -r .token)
+        JWT=$(jq -n --arg u "$DOCKERHUB_USERNAME" --arg p "$DOCKERHUB_TOKEN" '{username: $u, password: $p}' \
+          | curl -s -X POST https://hub.docker.com/v2/users/login \
+              -H "Content-Type: application/json" \
+              --data-binary @- \
+          | jq -r .token)
 
         if [ "$JWT" = "null" ] || [ -z "$JWT" ]; then
           echo "WARNING: Failed to authenticate with Docker Hub"
@@ -56,29 +59,29 @@ runs:
         # Build quick start example based on requirements
         if [ "$MLOCK" = "true" ]; then
           QUICKSTART="\`\`\`bash
-        podman run -d --name ${{ inputs.image_name }} \\
+        podman run -d --name ${IMAGE_NAME} \\
           --annotation 'org.freebsd.jail.allow.mlock=true' \\
-          docker.io/daemonless/${{ inputs.image_name }}:latest
+          docker.io/daemonless/${IMAGE_NAME}:latest
         \`\`\`
 
         > **Note:** This is a .NET application requiring a [patched ocijail](https://daemonless.io/guides/ocijail-patch/) for memory locking support."
         elif [ "$SYSVIPC" = "true" ]; then
           QUICKSTART="\`\`\`bash
-        podman run -d --name ${{ inputs.image_name }} \\
+        podman run -d --name ${IMAGE_NAME} \\
           --annotation 'org.freebsd.jail.allow.sysvipc=true' \\
-          docker.io/daemonless/${{ inputs.image_name }}:latest
+          docker.io/daemonless/${IMAGE_NAME}:latest
         \`\`\`
 
         > **Note:** This application requires System V IPC (shared memory) support in the jail."
         else
           QUICKSTART="\`\`\`bash
-        podman run -d --name ${{ inputs.image_name }} \\
-          docker.io/daemonless/${{ inputs.image_name }}:latest
+        podman run -d --name ${IMAGE_NAME} \\
+          docker.io/daemonless/${IMAGE_NAME}:latest
         \`\`\`"
         fi
 
         # Build full description
-        FULL_DESC="# ${TITLE:-${{ inputs.image_name }}}
+        FULL_DESC="# ${TITLE:-${IMAGE_NAME}}
 
         ${DESC}
 
@@ -88,8 +91,8 @@ runs:
 
         ## Documentation
 
-        - **Docs**: [daemonless.io/images/${{ inputs.image_name }}](https://daemonless.io/images/${{ inputs.image_name }}/)
-        - **Source**: [github.com/daemonless/${{ inputs.image_name }}](https://github.com/daemonless/${{ inputs.image_name }})
+        - **Docs**: [daemonless.io/images/${IMAGE_NAME}](https://daemonless.io/images/${IMAGE_NAME}/)
+        - **Source**: [github.com/daemonless/${IMAGE_NAME}](https://github.com/daemonless/${IMAGE_NAME})
         ${UPSTREAM:+- **Upstream**: [${UPSTREAM}](${UPSTREAM})}
         ${WEBSITE:+- **Website**: [${WEBSITE}](${WEBSITE})}
 
@@ -100,12 +103,14 @@ runs:
         [daemonless.io](https://daemonless.io) | [Discord](https://discord.gg/PTg5DJ2y) | [GitHub](https://github.com/daemonless)
         "
 
-        SHORT_DESC=$(echo "$DESC" | head -c 100)
-        FULL_DESC_JSON=$(printf '%s' "$FULL_DESC" | jq -Rs .)
+        SHORT_DESC=$(printf '%s' "$DESC" | head -c 100)
 
-        curl -s -X PATCH "https://hub.docker.com/v2/repositories/daemonless/${{ inputs.image_name }}/" \
-          -H "Authorization: Bearer $JWT" \
-          -H "Content-Type: application/json" \
-          -d "{\"description\":\"${SHORT_DESC}\",\"full_description\":${FULL_DESC_JSON}}" | jq .
+        jq -n --arg desc "$SHORT_DESC" --arg full "$FULL_DESC" \
+          '{description: $desc, full_description: $full}' \
+          | curl -s -X PATCH "https://hub.docker.com/v2/repositories/daemonless/${IMAGE_NAME}/" \
+              -H "Authorization: Bearer $JWT" \
+              -H "Content-Type: application/json" \
+              --data-binary @- \
+          | jq .
 
         echo "Docker Hub description updated"

@@ -68,6 +68,8 @@ jobs:
   # Detect which variants exist and build dynamic matrix
   detect:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       matrix: ${{ steps.detect.outputs.matrix }}
       compose_only: ${{ steps.detect.outputs.compose_only }}
@@ -78,14 +80,30 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Resolve build-tools ref
         id: resolve-build-tools
         env:
           GH_TOKEN: ${{ github.token }}
+          INPUT_REF: ${{ inputs.build_tools_ref }}
+          IMAGE_NAME: ${{ inputs.image_name }}
         run: |
-          if [ -n "${{ inputs.build_tools_ref }}" ]; then
-            echo "ref=${{ inputs.build_tools_ref }}" >> "$GITHUB_OUTPUT"
+          case "$IMAGE_NAME" in
+            ""|*[!A-Za-z0-9._-]*|-*|.|..)
+              echo "::error::Invalid image_name: $IMAGE_NAME"
+              exit 1
+              ;;
+          esac
+          if [ -n "$INPUT_REF" ]; then
+            case "$INPUT_REF" in
+              *[!A-Za-z0-9._-]*|-*|.|..)
+                echo "::error::Invalid build_tools_ref: $INPUT_REF"
+                exit 1
+                ;;
+            esac
+            echo "ref=$INPUT_REF" >> "$GITHUB_OUTPUT"
           else
             REF=$(gh api repos/daemonless/build-tools/releases/latest --jq '.tag_name')
             echo "ref=$REF" >> "$GITHUB_OUTPUT"
@@ -96,40 +114,71 @@ jobs:
 
       - name: Detect build matrix
         id: detect
+        env:
+          FETCH_REF: ${{ inputs.dbuild_ref || env.DBUILD_REF }}
+          ARCH_FILTER: ${{ inputs.arch }}
+          VARIANT: ${{ inputs.variant }}
+          REPO_OWNER: ${{ github.repository_owner }}
         run: |
+          case "$FETCH_REF" in
+            ""|*[!A-Za-z0-9._/-]*|-*|*..*|/*|*/)
+              echo "::error::Invalid dbuild_ref: $FETCH_REF"
+              exit 1
+              ;;
+          esac
           # Fetch dbuild
-          curl -sSL "https://github.com/daemonless/dbuild/archive/${{ inputs.dbuild_ref || env.DBUILD_REF }}.tar.gz" | tar xz -C /tmp
-          DBUILD_DIR=$(find /tmp -maxdepth 1 -type d -name 'dbuild-*' | head -1)
-          export PYTHONPATH="$DBUILD_DIR"
-          ARCH_FILTER="${{ inputs.arch }}"
+          rm -rf /tmp/dbuild
+          mkdir -p /tmp/dbuild
+          curl -fsSL "https://github.com/daemonless/dbuild/archive/${FETCH_REF}.tar.gz" | tar xz -C /tmp/dbuild --strip-components=1
+          export PYTHONPATH="/tmp/dbuild"
           # daemonless org defaults CI to amd64-only -- non-amd64 archs are
           # QEMU-emulated on GHA runners and not something we want auto-
           # building on every push. A caller can still opt back in by
           # passing the `arch` input explicitly. Other orgs reusing this
           # workflow get every architecture listed in .daemonless/config.yaml,
           # unrestricted, by default.
-          if [ -z "$ARCH_FILTER" ] && [ "${{ github.repository_owner }}" = "daemonless" ]; then
+          if [ -z "$ARCH_FILTER" ] && [ "$REPO_OWNER" = "daemonless" ]; then
             ARCH_FILTER="amd64"
           fi
-          python3 -m dbuild ${ARCH_FILTER:+--arch "$ARCH_FILTER"} ${{ inputs.variant && format('--variant {0}', inputs.variant) || '' }} detect --format github
+          args=()
+          if [ -n "$ARCH_FILTER" ]; then
+            args+=(--arch "$ARCH_FILTER")
+          fi
+          if [ -n "$VARIANT" ]; then
+            args+=(--variant "$VARIANT")
+          fi
+          python3 -m dbuild "${args[@]}" detect --format github
 
   # Fails the check if dbuild lint reports errors. build doesn't need it:
   # a metadata error shows red but never holds back a rebuild.
   lint:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Install dependencies
         run: pip install PyYAML jinja2
 
       - name: dbuild lint
+        env:
+          FETCH_REF: ${{ inputs.dbuild_ref || env.DBUILD_REF }}
         run: |
           set -o pipefail
-          curl -fsSL "https://github.com/daemonless/dbuild/archive/${{ inputs.dbuild_ref || env.DBUILD_REF }}.tar.gz" | tar xz -C /tmp
-          DBUILD_DIR=$(find /tmp -maxdepth 1 -type d -name 'dbuild-*' | head -1)
-          export PYTHONPATH="$DBUILD_DIR"
+          case "$FETCH_REF" in
+            ""|*[!A-Za-z0-9._/-]*|-*|*..*|/*|*/)
+              echo "::error::Invalid dbuild_ref: $FETCH_REF"
+              exit 1
+              ;;
+          esac
+          rm -rf /tmp/dbuild
+          mkdir -p /tmp/dbuild
+          curl -fsSL "https://github.com/daemonless/dbuild/archive/${FETCH_REF}.tar.gz" | tar xz -C /tmp/dbuild --strip-components=1
+          export PYTHONPATH="/tmp/dbuild"
           # rc captured on its own: piping the { ...; echo } block through tee
           # reported the last echo's status, so lint errors never failed the job.
           rc=0
@@ -172,13 +221,24 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Generate Containerfile/README from templates
         if: inputs.generate
+        env:
+          FETCH_REF: ${{ inputs.dbuild_ref || env.DBUILD_REF }}
         run: |
-          curl -sSL "https://github.com/daemonless/dbuild/archive/${{ inputs.dbuild_ref || env.DBUILD_REF }}.tar.gz" | tar xz -C /tmp
-          DBUILD_DIR=$(find /tmp -maxdepth 1 -type d -name 'dbuild-*' | head -1)
-          export PYTHONPATH="$DBUILD_DIR"
+          case "$FETCH_REF" in
+            ""|*[!A-Za-z0-9._/-]*|-*|*..*|/*|*/)
+              echo "::error::Invalid dbuild_ref: $FETCH_REF"
+              exit 1
+              ;;
+          esac
+          rm -rf /tmp/dbuild
+          mkdir -p /tmp/dbuild
+          curl -fsSL "https://github.com/daemonless/dbuild/archive/${FETCH_REF}.tar.gz" | tar xz -C /tmp/dbuild --strip-components=1
+          export PYTHONPATH="/tmp/dbuild"
           pip install -q PyYAML jinja2
           python3 -m dbuild generate
 
@@ -209,7 +269,9 @@ jobs:
           fi
           pw=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | cut -c1-8)
           echo "::add-mask::$pw"
-          command -v age >/dev/null || sudo apt-get install -y -qq age >/dev/null
+          if ! command -v age >/dev/null; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq age >/dev/null
+          fi
           enc=$(printf '%s' "$pw" | age -a -R /tmp/vnc-keys)
           {
             echo "### One-time VNC password"
@@ -225,13 +287,15 @@ jobs:
       - name: Build in FreeBSD VM (${{ matrix.tag }}${{ matrix.arch_suffix }})
         uses: vmactions/freebsd-vm@v1.6.0
         env:
-          # A debug run publishes nothing, so its VM, which a console can reach,
-          # gets no credentials; builds fall back to unauthenticated API calls.
-          GITHUB_TOKEN: ${{ steps.vnc.outputs.pw == '' && secrets.GITHUB_TOKEN || '' }}
+          # A debug run or PR publishes nothing, so its VM gets no push
+          # credentials; builds fall back to unauthenticated API calls.
+          GITHUB_TOKEN: ${{ github.event_name != 'pull_request' && steps.vnc.outputs.pw == '' && secrets.GITHUB_TOKEN || '' }}
           GITHUB_ACTOR: ${{ github.actor }}
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ steps.vnc.outputs.pw == '' && secrets.DOCKERHUB_TOKEN || '' }}
+          DOCKERHUB_USERNAME: ${{ github.event_name != 'pull_request' && steps.vnc.outputs.pw == '' && secrets.DOCKERHUB_USERNAME || '' }}
+          DOCKERHUB_TOKEN: ${{ github.event_name != 'pull_request' && steps.vnc.outputs.pw == '' && secrets.DOCKERHUB_TOKEN || '' }}
           DBUILD_REGISTRY: ${{ inputs.registry }}
+          FETCH_REF: ${{ inputs.dbuild_ref || env.DBUILD_REF }}
+          IMAGE_NAME: ${{ inputs.image_name }}
         with:
           release: "15.1-zfs"
           vnc-password: ${{ steps.vnc.outputs.pw }}
@@ -243,7 +307,7 @@ jobs:
           copyback: true
           data-dir: /mnt/freebsd-vm
           debug-on-error: ${{ steps.vnc.outputs.pw != '' }}
-          envs: "GITHUB_TOKEN GITHUB_ACTOR DOCKERHUB_USERNAME DOCKERHUB_TOKEN DBUILD_REGISTRY"
+          envs: "GITHUB_TOKEN GITHUB_ACTOR DOCKERHUB_USERNAME DOCKERHUB_TOKEN DBUILD_REGISTRY FETCH_REF IMAGE_NAME"
           prepare: |
             set -e
             # Create 4GB swap for heavy builds
@@ -272,9 +336,17 @@ jobs:
           run: |
             set -e
 
+            case "$FETCH_REF" in
+              ""|*[!A-Za-z0-9._/-]*|-*|*..*|/*|*/)
+                echo "Invalid dbuild_ref: $FETCH_REF" >&2
+                exit 1
+                ;;
+            esac
+
             # Fetch dbuild
             fetch -qo /tmp/dbuild.tar.gz \
-              "https://github.com/daemonless/dbuild/archive/${{ inputs.dbuild_ref || env.DBUILD_REF }}.tar.gz"
+              "https://github.com/daemonless/dbuild/archive/${FETCH_REF}.tar.gz"
+            rm -rf /tmp/dbuild
             mkdir -p /tmp/dbuild
             tar -xzf /tmp/dbuild.tar.gz -C /tmp/dbuild --strip-components=1
             export PYTHONPATH="/tmp/dbuild"
@@ -285,7 +357,6 @@ jobs:
 
             VARIANT="${{ matrix.tag }}"
             ARCH="${{ matrix.arch }}"
-            IMAGE_NAME="${{ inputs.image_name }}"
 
             # Read old version from sbom.json before build. Per-arch images
             # key sbom.json by the suffixed tag (16-pkg-latest-amd64).
@@ -315,7 +386,7 @@ jobs:
             mkdir -p cit-results
             cit_exit=0
             $DBUILD -v test --variant "$VARIANT" \
-              --json cit-results/${{ inputs.image_name }}-${{ matrix.tag }}${{ matrix.arch_suffix }}.json \
+              --json "cit-results/${IMAGE_NAME}-${{ matrix.tag }}${{ matrix.arch_suffix }}.json" \
               || cit_exit=$?
 
             # Copy any temp screenshots to results
@@ -329,7 +400,7 @@ jobs:
               PM="postmortem-${{ matrix.tag }}"
               podman rm -f "$PM" >/dev/null 2>&1 || true
               podman run -d --name "$PM" -e PUID=1000 -e PGID=1000 \
-                "${DBUILD_REGISTRY}/${{ inputs.image_name }}:build-${VARIANT}" \
+                "${DBUILD_REGISTRY}/${IMAGE_NAME}:build-${VARIANT}" \
                 >/dev/null 2>&1 || true
               sleep 45
               {
@@ -472,18 +543,29 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Fetch dbuild
+        env:
+          FETCH_REF: ${{ inputs.dbuild_ref || env.DBUILD_REF }}
         run: |
-          curl -fsSL "https://github.com/daemonless/dbuild/archive/${{ inputs.dbuild_ref || env.DBUILD_REF }}.tar.gz" | tar xz -C /tmp
-          mv /tmp/dbuild-* /tmp/dbuild
+          case "$FETCH_REF" in
+            ""|*[!A-Za-z0-9._/-]*|-*|*..*|/*|*/)
+              echo "::error::Invalid dbuild_ref: $FETCH_REF"
+              exit 1
+              ;;
+          esac
+          rm -rf /tmp/dbuild
+          mkdir -p /tmp/dbuild
+          curl -fsSL "https://github.com/daemonless/dbuild/archive/${FETCH_REF}.tar.gz" | tar xz -C /tmp/dbuild --strip-components=1
           pip install -q PyYAML
 
       - name: Build and test (linux/${{ matrix.arch }})
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.event_name != 'pull_request' && secrets.GITHUB_TOKEN || '' }}
+          DOCKERHUB_USERNAME: ${{ github.event_name != 'pull_request' && secrets.DOCKERHUB_USERNAME || '' }}
+          DOCKERHUB_TOKEN: ${{ github.event_name != 'pull_request' && secrets.DOCKERHUB_TOKEN || '' }}
         run: |
           export PYTHONPATH=/tmp/dbuild
           python3 /tmp/dbuild/.github/scripts/linux-image.py ${{ matrix.arch }} \
@@ -498,17 +580,31 @@ jobs:
       && github.event_name != 'pull_request'
       && (contains(needs.detect.outputs.declared_architectures, 'aarch64') || inputs.linux)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Install skopeo
         run: sudo apt-get update -qq && sudo apt-get install -y skopeo
 
       - name: Fetch dbuild
+        env:
+          FETCH_REF: ${{ inputs.dbuild_ref || env.DBUILD_REF }}
         run: |
-          curl -sSL "https://github.com/daemonless/dbuild/archive/${{ inputs.dbuild_ref || env.DBUILD_REF }}.tar.gz" | tar xz -C /tmp
-          mv /tmp/dbuild-* /tmp/dbuild
+          case "$FETCH_REF" in
+            ""|*[!A-Za-z0-9._/-]*|-*|*..*|/*|*/)
+              echo "::error::Invalid dbuild_ref: $FETCH_REF"
+              exit 1
+              ;;
+          esac
+          rm -rf /tmp/dbuild
+          mkdir -p /tmp/dbuild
+          curl -fsSL "https://github.com/daemonless/dbuild/archive/${FETCH_REF}.tar.gz" | tar xz -C /tmp/dbuild --strip-components=1
 
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: dbuild manifest
         env:
@@ -526,6 +622,8 @@ jobs:
     needs: detect
     if: ${{ needs.detect.outputs.compose_only == 'true' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Free disk space
@@ -542,6 +640,8 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Prepare VM data directory
         run: sudo mkdir -p /mnt/freebsd-vm && sudo chmod 777 /mnt/freebsd-vm
@@ -560,7 +660,9 @@ jobs:
           fi
           pw=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | cut -c1-8)
           echo "::add-mask::$pw"
-          command -v age >/dev/null || sudo apt-get install -y -qq age >/dev/null
+          if ! command -v age >/dev/null; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq age >/dev/null
+          fi
           enc=$(printf '%s' "$pw" | age -a -R /tmp/vnc-keys)
           {
             echo "### One-time VNC password"
@@ -575,6 +677,9 @@ jobs:
 
       - name: Test in FreeBSD VM
         uses: vmactions/freebsd-vm@v1.6.0
+        env:
+          FETCH_REF: ${{ inputs.dbuild_ref || env.DBUILD_REF }}
+          IMAGE_NAME: ${{ inputs.image_name }}
         with:
           release: "15.1-zfs"
           vnc-password: ${{ steps.vnc.outputs.pw }}
@@ -582,6 +687,7 @@ jobs:
           copyback: true
           data-dir: /mnt/freebsd-vm
           debug-on-error: ${{ steps.vnc.outputs.pw != '' }}
+          envs: "FETCH_REF IMAGE_NAME"
           prepare: |
             set -e
             # Install build tools from pinned bundle
@@ -602,9 +708,17 @@ jobs:
           run: |
             set -e
 
+            case "$FETCH_REF" in
+              ""|*[!A-Za-z0-9._/-]*|-*|*..*|/*|*/)
+                echo "Invalid dbuild_ref: $FETCH_REF" >&2
+                exit 1
+                ;;
+            esac
+
             # Fetch dbuild
             fetch -qo /tmp/dbuild.tar.gz \
-              "https://github.com/daemonless/dbuild/archive/${{ inputs.dbuild_ref || env.DBUILD_REF }}.tar.gz"
+              "https://github.com/daemonless/dbuild/archive/${FETCH_REF}.tar.gz"
+            rm -rf /tmp/dbuild
             mkdir -p /tmp/dbuild
             tar -xzf /tmp/dbuild.tar.gz -C /tmp/dbuild --strip-components=1
             export PYTHONPATH="/tmp/dbuild"
@@ -612,7 +726,7 @@ jobs:
 
             mkdir -p cit-results
             $DBUILD -v test \
-              --json cit-results/${{ inputs.image_name }}.json
+              --json "cit-results/${IMAGE_NAME}.json"
 
       - name: Upload test artifacts
         uses: actions/upload-artifact@v7
@@ -627,9 +741,17 @@ jobs:
         continue-on-error: true
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+          JOB_STATUS: ${{ job.status }}
+          COMMIT_SHA: ${{ github.sha }}
+          COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BRANCH: ${{ github.ref_name }}
         run: |
-          [ -z "$DISCORD_WEBHOOK" ] && exit 0
-          if [ "${{ job.status }}" = "success" ]; then
+          if [ -z "$DISCORD_WEBHOOK" ]; then
+            exit 0
+          fi
+          if [ "$JOB_STATUS" = "success" ]; then
             COLOR=3066993
             STATUS="Success"
           else
@@ -637,11 +759,18 @@ jobs:
             STATUS="Failed"
           fi
 
-          SHORT_SHA="${{ github.sha }}"
-          SHORT_SHA="${SHORT_SHA:0:7}"
+          SHORT_SHA="${COMMIT_SHA:0:7}"
+
+          PAYLOAD=$(jq -n \
+            --arg title "${IMAGE_NAME} compose test ${STATUS}" \
+            --arg url "$RUN_URL" \
+            --argjson color "$COLOR" \
+            --arg commit "[$SHORT_SHA]($COMMIT_URL)" \
+            --arg branch "$BRANCH" \
+            '{embeds:[{title:$title,url:$url,color:$color,fields:[{name:"Commit",value:$commit,inline:true},{name:"Branch",value:$branch,inline:true}]}]}')
 
           curl -sS -H "Content-Type: application/json" \
-            -d "{\"embeds\":[{\"title\":\"${{ inputs.image_name }} compose test $STATUS\",\"url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",\"color\":$COLOR,\"fields\":[{\"name\":\"Commit\",\"value\":\"[$SHORT_SHA](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})\",\"inline\":true},{\"name\":\"Branch\",\"value\":\"${{ github.ref_name }}\",\"inline\":true}]}]}" \
+            --data-binary "$PAYLOAD" \
             "$DISCORD_WEBHOOK"
 
   # Merge SBOMs and commit to repo
@@ -654,6 +783,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Download all SBOM artifacts
         uses: actions/download-artifact@v8
@@ -662,9 +793,11 @@ jobs:
           path: sbom-artifacts/
 
       - name: Merge SBOMs
+        env:
+          IMAGE_NAME: ${{ inputs.image_name }}
         run: |
           jq -n \
-            --arg image "${{ inputs.image_name }}" \
+            --arg image "$IMAGE_NAME" \
             --arg generated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             '{image: $image, generated: $generated, tags: {}}' > sbom.json
 
@@ -688,10 +821,19 @@ jobs:
       - name: Generate Containerfile/README from templates
         id: generate
         if: inputs.generate
+        env:
+          FETCH_REF: ${{ inputs.dbuild_ref || env.DBUILD_REF }}
         run: |
-          curl -sSL "https://github.com/daemonless/dbuild/archive/${{ inputs.dbuild_ref || env.DBUILD_REF }}.tar.gz" | tar xz -C /tmp
-          DBUILD_DIR=$(find /tmp -maxdepth 1 -type d -name 'dbuild-*' | head -1)
-          export PYTHONPATH="$DBUILD_DIR"
+          case "$FETCH_REF" in
+            ""|*[!A-Za-z0-9._/-]*|-*|*..*|/*|*/)
+              echo "::error::Invalid dbuild_ref: $FETCH_REF"
+              exit 1
+              ;;
+          esac
+          rm -rf /tmp/dbuild
+          mkdir -p /tmp/dbuild
+          curl -fsSL "https://github.com/daemonless/dbuild/archive/${FETCH_REF}.tar.gz" | tar xz -C /tmp/dbuild --strip-components=1
+          export PYTHONPATH="/tmp/dbuild"
           pip install -q PyYAML jinja2
           # "=== Generated <name> ===" is dbuild's own step log for each file
           # it writes (Containerfile, Containerfile.pkg, Containerfile.krb,
@@ -703,6 +845,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VARIANT: ${{ inputs.variant }}
+          SERVER_URL: ${{ github.server_url }}
+          GENERATED_FILES: ${{ steps.generate.outputs.files }}
         run: |
           # Keep this run's files aside: main moves while the build runs (the
           # aarch64 leg and overlapping runs commit too), so each attempt
@@ -710,7 +854,8 @@ jobs:
           # build's SBOM is the truth; a one-variant build only replaces the
           # tags it built and keeps the rest of main's.
           FILES="sbom.json"
-          for f in ${{ steps.generate.outputs.files }}; do
+          # shellcheck disable=SC2086 # GENERATED_FILES is a space-separated list
+          for f in $GENERATED_FILES; do
             [ -f "$f" ] && FILES="$FILES $f"
           done
           mkdir -p /tmp/ours
@@ -720,6 +865,8 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          AUTH_HEADER="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
+          git config --local "http.${SERVER_URL}/.extraheader" "$AUTH_HEADER"
           for attempt in 1 2 3 4 5; do
             git fetch -q origin main
             git reset -q --hard origin/main
@@ -780,7 +927,10 @@ jobs:
       - name: Login to GHCR
         # cosign's own login writes credentials where cosign's keychain reads
         # them (podman login, used by other jobs, writes a path cosign ignores).
-        run: cosign login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
+        env:
+          GH_USER: ${{ github.actor }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GH_TOKEN" | cosign login ghcr.io -u "$GH_USER" --password-stdin
 
       - name: Download SBOM artifacts
         uses: actions/download-artifact@v8
@@ -843,7 +993,10 @@ jobs:
         uses: sigstore/cosign-installer@v4.1.3
 
       - name: Login to GHCR
-        run: cosign login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
+        env:
+          GH_USER: ${{ github.actor }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GH_TOKEN" | cosign login ghcr.io -u "$GH_USER" --password-stdin
 
       - name: Download SBOM artifacts
         uses: actions/download-artifact@v8
@@ -875,6 +1028,7 @@ jobs:
     needs: [build, test-compose, commit-sbom, create-manifests]
     if: always() && !failure() && !cancelled() && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    permissions: {}
     steps:
       # Dispatch as the daemonless-dispatch App (installed on daemonless-io
       # only) so the deploy run is attributed to a bot, not to a PAT owner.
@@ -907,11 +1061,20 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Announce new container
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ANNOUNCE_WEBHOOK: ${{ secrets.DISCORD_ANNOUNCE_WEBHOOK || secrets.DISCORD_WEBHOOK }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_NUMBER: ${{ github.run_number }}
+          COMMIT_SHA: ${{ github.sha }}
+          SERVER_URL: ${{ github.server_url }}
+          BRANCH: ${{ github.ref_name }}
         run: |
           set -e
           [ -f .daemonless/config.yaml ] || exit 0
@@ -923,15 +1086,14 @@ jobs:
           PRIOR_SUCCESSES=$(curl -sS \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/runs?branch=main&status=success&per_page=10" \
-            | jq --arg current_id "${{ github.run_id }}" --arg current_run "${{ github.run_number }}" \
+            "https://api.github.com/repos/${REPO}/actions/runs?branch=main&status=success&per_page=10" \
+            | jq --arg current_id "$RUN_ID" --arg current_run "$RUN_NUMBER" \
                  '[.workflow_runs[] | select((.id | tostring) != $current_id and .run_number < ($current_run | tonumber))] | length')
 
           [ "$PRIOR_SUCCESSES" -eq 0 ] || exit 0
 
-          SHORT_SHA="${{ github.sha }}"
-          SHORT_SHA="${SHORT_SHA:0:7}"
-          COMMIT_URL="${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}"
+          SHORT_SHA="${COMMIT_SHA:0:7}"
+          COMMIT_URL="${SERVER_URL}/${REPO}/commit/${COMMIT_SHA}"
 
           DESCRIPTION=""
           if [ -f compose.yaml ]; then
@@ -943,7 +1105,7 @@ jobs:
           for ext in png jpg webp svg; do
             [ -f ".daemonless/logo.$ext" ] || continue
             if [ "$ext" = svg ]; then
-              { sudo apt-get install -y -qq librsvg2-bin >/dev/null \
+              { sudo apt-get update -qq && sudo apt-get install -y -qq librsvg2-bin >/dev/null \
                 && rsvg-convert -w 256 -h 256 --keep-aspect-ratio \
                      -o "$RUNNER_TEMP/logo.png" .daemonless/logo.svg \
                 && LOGO="$RUNNER_TEMP/logo.png"; } || echo "::warning::logo.svg conversion failed; announcing without logo"
@@ -955,12 +1117,12 @@ jobs:
           LOGO_NAME="logo.${LOGO##*.}"
 
           jq -n \
-            --arg title "🚀 New Container Fleet Addition: ${{ inputs.image_name }}" \
+            --arg title "🚀 New Container Fleet Addition: ${IMAGE_NAME}" \
             --arg desc "$DESCRIPTION" \
             --arg url "$COMMIT_URL" \
-            --arg registry "[ghcr.io](https://ghcr.io/daemonless/${{ inputs.image_name }})" \
+            --arg registry "[ghcr.io](https://ghcr.io/daemonless/${IMAGE_NAME})" \
             --arg commit "[$SHORT_SHA]($COMMIT_URL)" \
-            --arg branch "${{ github.ref_name }}" \
+            --arg branch "$BRANCH" \
             --arg thumb "${LOGO:+attachment://$LOGO_NAME}" \
             '{username: "Daemonless New Containers", embeds: [{
               title: $title, url: $url, color: 15844367,
